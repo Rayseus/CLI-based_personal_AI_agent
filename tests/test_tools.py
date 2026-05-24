@@ -15,9 +15,12 @@ if ROOT not in sys.path:
 
 from memory_store import MemoryStore  # noqa: E402
 from tools import (  # noqa: E402
+    NEUTRAL_REPLY,
     TOOL_SCHEMAS,
+    UNKNOWN_REPLY,
     dispatch,
     verify_citations,
+    verify_reply,
 )
 
 
@@ -142,6 +145,61 @@ class TestVerifyCitations(unittest.TestCase, _TempStoreMixin):
         store = self._new_store()
         cleaned, log = verify_citations("", store)
         self.assertEqual(cleaned, "")
+        self.assertEqual(log, [])
+
+
+class TestVerifyReply(unittest.TestCase, _TempStoreMixin):
+    def test_empty_search_forces_unknown(self) -> None:
+        store = self._new_store()
+        cleaned, log = verify_reply(
+            "Your favorite color is blue.",
+            store,
+            allowed_memory_ids=set(),
+        )
+        self.assertEqual(cleaned, UNKNOWN_REPLY)
+        self.assertEqual(log, [{"status": "empty_search_override"}])
+
+    def test_empty_search_preserves_admission(self) -> None:
+        store = self._new_store()
+        reply = "I don't know — you haven't told me that yet."
+        cleaned, log = verify_reply(reply, store, allowed_memory_ids=set())
+        self.assertEqual(cleaned, reply)
+        self.assertEqual(log, [])
+
+    def test_citation_not_in_search_stripped(self) -> None:
+        store = self._new_store()
+        mid = store.save("congee fact", ["food"])
+        reply = f"Try congee [memory:{mid}]."
+        cleaned, log = verify_reply(reply, store, allowed_memory_ids=set())
+        self.assertEqual(cleaned, UNKNOWN_REPLY)
+        self.assertEqual(
+            log,
+            [
+                {"id": mid, "status": "fail_not_in_search"},
+                {"status": "empty_search_override"},
+            ],
+        )
+
+    def test_citation_in_allowed_set_kept(self) -> None:
+        store = self._new_store()
+        mid = store.save("congee fact", ["food"])
+        reply = f"Try congee [memory:{mid}]."
+        cleaned, log = verify_reply(reply, store, allowed_memory_ids={mid})
+        self.assertEqual(cleaned, reply)
+        self.assertEqual(log, [{"id": mid, "status": "ok"}])
+
+    def test_uncited_claim_becomes_neutral(self) -> None:
+        store = self._new_store()
+        reply = "You told me you love congee for recovery."
+        cleaned, log = verify_reply(reply, store)
+        self.assertEqual(cleaned, NEUTRAL_REPLY)
+        self.assertEqual(log, [{"status": "uncited_claim"}])
+
+    def test_save_ack_not_flagged(self) -> None:
+        store = self._new_store()
+        reply = "Got it, I noted that."
+        cleaned, log = verify_reply(reply, store)
+        self.assertEqual(cleaned, reply)
         self.assertEqual(log, [])
 
 

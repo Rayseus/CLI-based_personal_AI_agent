@@ -18,7 +18,7 @@ import sys
 from typing import Any
 
 from memory_store import MemoryStore
-from tools import TOOL_SCHEMAS, dispatch, verify_citations
+from tools import TOOL_SCHEMAS, dispatch, verify_reply
 
 
 SYSTEM_PROMPT = """You are a Personal Memory Agent running on the user's machine.
@@ -47,8 +47,17 @@ Keep replies concise (1-3 sentences) and practical.
 TOOL_LOOP_LIMIT = 6
 
 
-def _eprint(*args: Any) -> None:
-    print(*args, file=sys.stderr, flush=True)
+_DIAG_ENABLED = False
+
+
+def _configure_diagnostics(enabled: bool) -> None:
+    global _DIAG_ENABLED
+    _DIAG_ENABLED = enabled
+
+
+def _log_diagnostics(msg: str) -> None:
+    if _DIAG_ENABLED:
+        print(msg, file=sys.stderr, flush=True)
 
 
 def load_config() -> tuple[str, str, str]:
@@ -61,9 +70,11 @@ def load_config() -> tuple[str, str, str]:
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
-        _eprint(
+        print(
             "ERROR: GEMINI_API_KEY is not set. Copy .env.example to .env "
-            "and fill it in, or `export GEMINI_API_KEY=...`."
+            "and fill it in, or `export GEMINI_API_KEY=...`.",
+            file=sys.stderr,
+            flush=True,
         )
         sys.exit(1)
     model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
@@ -167,6 +178,8 @@ def chat(
         temperature=0.2,
     )
 
+    allowed_memory_ids: set[int] | None = None
+
     for _ in range(TOOL_LOOP_LIMIT):
         resp = client.models.generate_content(
             model=model,
@@ -181,10 +194,17 @@ def chat(
         fn_calls = _collect_function_calls(content.parts)
         if not fn_calls:
             text = _collect_text(content.parts)
-            cleaned, vlog = verify_citations(text, store)
+            cleaned, vlog = verify_reply(
+                text, store, allowed_memory_ids=allowed_memory_ids
+            )
             for entry in vlog:
-                _eprint(f"[VERIFY] id={entry['id']} status={entry['status']}")
-            if vlog and cleaned != text:
+                if "id" in entry:
+                    _log_diagnostics(
+                        f"[VERIFY] id={entry['id']} status={entry['status']}"
+                    )
+                else:
+                    _log_diagnostics(f"[VERIFY] status={entry['status']}")
+            if cleaned != text:
                 history[-1] = types.Content(
                     role="model", parts=[types.Part.from_text(text=cleaned)]
                 )
@@ -195,7 +215,11 @@ def chat(
             name = fc.name
             args = dict(fc.args) if fc.args else {}
             result = dispatch(name, args, store)
-            _eprint(
+            if name == "search_memory" and "results" in result:
+                allowed_memory_ids = {
+                    int(r["id"]) for r in result.get("results", [])
+                }
+            _log_diagnostics(
                 f"[TOOL] {name} args={json.dumps(args, ensure_ascii=False)} "
                 f"result={json.dumps(result, ensure_ascii=False)}"
             )
@@ -224,8 +248,13 @@ class _Tee:
 
 def main() -> int:
     api_key, model, db_path = load_config()
-    log_path = os.environ.get("AGENT_LOG_PATH", "agent.log").strip() or "agent.log"
     debug = os.environ.get("AGENT_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+    log_enabled = os.environ.get("AGENT_LOG_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    _configure_diagnostics(debug or log_enabled)
 
     from google import genai
 
@@ -234,22 +263,27 @@ def main() -> int:
 
     history: list = []
 
-    log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+    log_file = None
     original_stderr = sys.stderr
-    if debug:
-        sys.stderr = _Tee(original_stderr, log_file)
-    else:
-        sys.stderr = log_file
+    if log_enabled:
+        log_path = os.environ.get("AGENT_LOG_PATH", "agent.log").strip() or "agent.log"
+        log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+        if debug:
+            sys.stderr = _Tee(original_stderr, log_file)
+        else:
+            sys.stderr = log_file
+        log_file.write(
+            f"\n=== session start: model={model}, db={db_path} ===\n"
+        )
 
-    log_file.write(
-        f"\n=== session start: model={model}, db={db_path} ===\n"
-    )
-    print(
-        f"Personal Memory Agent ready (model={model}, db={db_path}).\n"
-        f"Tool / verify diagnostics -> {log_path}"
-        f"{' (also shown here)' if debug else ''}.\n"
-        "Type 'exit' to quit."
-    )
+    ready_msg = f"Personal Memory Agent ready (model={model}, db={db_path})."
+    if debug or log_enabled:
+        log_path = os.environ.get("AGENT_LOG_PATH", "agent.log").strip() or "agent.log"
+        ready_msg += (
+            f"\nTool / verify diagnostics -> {log_path}"
+            f"{' (also shown here)' if debug else ''}."
+        )
+    print(f"{ready_msg}\nType 'exit' to quit.")
     try:
         while True:
             try:
@@ -265,17 +299,17 @@ def main() -> int:
                 reply = chat(user, history, store, client, model)
             except Exception as e:
                 msg = f"[ERROR] {type(e).__name__}: {e}"
-                # Errors are always shown to the user, regardless of debug.
-                original_stderr.write(msg + "\n")
-                original_stderr.flush()
-                log_file.write(msg + "\n")
-                log_file.flush()
+                print(msg, file=sys.stderr, flush=True)
+                if log_file is not None:
+                    log_file.write(msg + "\n")
+                    log_file.flush()
                 continue
             print(f"agent> {reply}")
     finally:
         store.close()
-        sys.stderr = original_stderr
-        log_file.close()
+        if log_file is not None:
+            sys.stderr = original_stderr
+            log_file.close()
     return 0
 
 

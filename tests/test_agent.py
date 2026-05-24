@@ -164,6 +164,12 @@ class TestSystemPrompt(unittest.TestCase):
 
 
 class TestChatLoop(unittest.TestCase, _TempStoreMixin):
+    def setUp(self) -> None:
+        agent._configure_diagnostics(True)
+
+    def tearDown(self) -> None:
+        agent._configure_diagnostics(False)
+
     def test_TC_3_3_1_save_memory_call_writes_db(self) -> None:
         store = self._new_store()
         client = FakeClient(
@@ -242,7 +248,11 @@ class TestChatLoop(unittest.TestCase, _TempStoreMixin):
             )
 
         self.assertNotIn("[memory:99]", reply)
+        self.assertEqual(
+            reply, "I don't know — you haven't told me that yet."
+        )
         self.assertIn("[VERIFY] id=99 status=fail", buf.getvalue())
+        self.assertIn("[VERIFY] status=empty_search_override", buf.getvalue())
 
     def test_TC_3_3_3_loop_limit(self) -> None:
         store = self._new_store()
