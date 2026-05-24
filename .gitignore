@@ -6,4 +6,16 @@ memory.db
 *.db
 *.log
 .DS_Store
+
+# Local AI tooling (not pushed to GitHub)
+.cursor/
+.specify/
 ai-session/
+
+# Internal planning / execution logs (local only)
+CLAUDE.md
+DEVELOPMENT_PLAN.md
+EXECUTION_LOG.md
+EXECUTION_STEPS.md
+P0_CHANGELOG.md
+*_CHANGELOG.md
